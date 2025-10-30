@@ -45,7 +45,7 @@ function init() {
   mesh.position.z = -1.5;
   scene.add(mesh);
 
-  // RAYCASTER
+  // RAYCASTER a
   raycaster = new THREE.Raycaster();
 
   // EVENTO DE CLIQUE (para desktop)
