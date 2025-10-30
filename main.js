@@ -1,60 +1,71 @@
 import * as THREE from 'three';
 import { ARButton } from 'three/examples/jsm/webxr/ARButton.js';
 
-let scene, camera, renderer, mesh, raycaster, texture, ctx;
-let pointer = new THREE.Vector2();
-let intersection = null;
+let camera, scene, renderer;
+let mesh, texture, ctx;
+let hitTestSource = null;
+let localSpace = null;
+let hitTestSourceRequested = false;
+let reticle;
 
+// Inicializa tudo
 init();
 animate();
 
 function init() {
-  // CENA
+  // Cena e câmera
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x222222);
+  camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
 
-  // CÂMERA
-  camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 50);
-  camera.position.z = 1.5;
-
-  // RENDERER
-  renderer = new THREE.WebGLRenderer({ antialias: true });
+  // Renderer transparente (para sobrepor o mundo real)
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.xr.enabled = true;
+  renderer.setClearAlpha(0);
   document.body.appendChild(renderer.domElement);
-  document.body.appendChild(ARButton.createButton(renderer));
 
-  // LUZ
-  const light = new THREE.DirectionalLight(0xffffff, 1);
-  light.position.set(1, 1, 2);
+  // Botão de entrada AR
+  document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] }));
+
+  // Luz ambiente
+  const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
   scene.add(light);
 
-  // CRIA UMA TEXTURA EDITÁVEL A PARTIR DE CANVAS
+  // Canvas para textura
   const canvas = document.createElement('canvas');
   canvas.width = 512;
   canvas.height = 512;
   ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#888';
+  ctx.fillStyle = '#777';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   texture = new THREE.CanvasTexture(canvas);
 
-  // PLANO PARA PINTAR
-  const geometry = new THREE.PlaneGeometry(1, 1);
+  // Plano que receberá a pintura
+  const geometry = new THREE.PlaneGeometry(0.4, 0.4);
   const material = new THREE.MeshStandardMaterial({ map: texture });
   mesh = new THREE.Mesh(geometry, material);
-  mesh.position.z = -1.5;
+  mesh.visible = false; // só mostra depois do hit-test
   scene.add(mesh);
 
-  // RAYCASTER a
-  raycaster = new THREE.Raycaster();
+  // Reticle (indicador de onde o plano será colocado)
+  reticle = new THREE.Mesh(
+    new THREE.RingGeometry(0.07, 0.1, 32).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({ color: 0x00ff00 })
+  );
+  reticle.visible = false;
+  scene.add(reticle);
 
-  // EVENTO DE CLIQUE (para desktop)
-  window.addEventListener('click', onClick);
-
-  // VR CONTROLLER (para modo VR)
-  const controller = renderer.xr.getController(0);
-  controller.addEventListener('selectstart', () => paintFromCamera());
-  scene.add(controller);
+  // Pintar ao tocar
+  window.addEventListener('click', () => {
+    if (reticle.visible && !mesh.visible) {
+      // Coloca o plano na posição detectada
+      mesh.position.copy(reticle.position);
+      mesh.quaternion.copy(reticle.quaternion);
+      mesh.visible = true;
+    } else if (mesh.visible) {
+      paintFromCamera();
+    }
+  });
 
   window.addEventListener('resize', onWindowResize);
 }
@@ -65,38 +76,62 @@ function onWindowResize() {
   renderer.setSize(window.innerWidth, window.innerHeight);
 }
 
-// 🎯 Lança o raio do centro da câmera e pinta se acertar
+// Função de pintura — dispara do centro da câmera
 function paintFromCamera() {
+  const raycaster = new THREE.Raycaster();
   const origin = new THREE.Vector3();
   const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
   raycaster.set(origin.copy(camera.position), direction);
   const hits = raycaster.intersectObject(mesh);
-
   if (hits.length > 0) {
-    const hit = hits[0];
-    const uv = hit.uv;
-
-    // converte UV em coordenadas do canvas
+    const uv = hits[0].uv;
     const x = uv.x * ctx.canvas.width;
     const y = (1 - uv.y) * ctx.canvas.height;
-
-    // pinta um pequeno círculo vermelho
     ctx.fillStyle = '#ff0000';
     ctx.beginPath();
-    ctx.arc(x, y, 8, 0, Math.PI * 2);
+    ctx.arc(x, y, 10, 0, Math.PI * 2);
     ctx.fill();
-
     texture.needsUpdate = true;
   }
 }
 
-// Clique de mouse no desktop
-function onClick() {
-  paintFromCamera();
+// Loop de animação + hit-test
+function animate() {
+  renderer.setAnimationLoop(render);
 }
 
-function animate() {
-  renderer.setAnimationLoop(() => {
-    renderer.render(scene, camera);
-  });
+function render(timestamp, frame) {
+  if (frame) {
+    const referenceSpace = renderer.xr.getReferenceSpace();
+    const session = renderer.xr.getSession();
+
+    if (!hitTestSourceRequested) {
+      session.requestReferenceSpace('viewer').then((space) => {
+        session.requestHitTestSource({ space }).then((source) => {
+          hitTestSource = source;
+        });
+      });
+      hitTestSourceRequested = true;
+      localSpace = referenceSpace;
+      session.addEventListener('end', () => {
+        hitTestSourceRequested = false;
+        hitTestSource = null;
+      });
+    }
+
+    if (hitTestSource) {
+      const hitTestResults = frame.getHitTestResults(hitTestSource);
+      if (hitTestResults.length > 0) {
+        const hit = hitTestResults[0];
+        const pose = hit.getPose(localSpace);
+        reticle.visible = true;
+        reticle.position.set(pose.transform.position.x, pose.transform.position.y, pose.transform.position.z);
+        reticle.quaternion.setFromRotationMatrix(new THREE.Matrix4().fromArray(pose.transform.matrix));
+      } else {
+        reticle.visible = false;
+      }
+    }
+  }
+
+  renderer.render(scene, camera);
 }
